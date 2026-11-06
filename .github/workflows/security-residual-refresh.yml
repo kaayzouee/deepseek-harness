@@ -67,6 +67,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
       - name: Validate candidate without waiving security
+        id: validate
         run: |
           set -euo pipefail
           git diff --check
@@ -83,10 +84,16 @@ jobs:
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm run verify-package-dependencies
           pnpm run release:verify --family dsh
-          pnpm audit --prod --audit-level moderate
+          if ! pnpm audit --prod --audit-level moderate; then
+            echo '::warning::Moderate advisories remain; review the uploaded patch. No candidate changes will be committed.'
+            echo 'Candidate not committed: moderate production advisories remain.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           pnpm exec vitest run scripts/release
           git diff --check
+          echo 'verified=true' >> "$GITHUB_OUTPUT"
       - name: Commit only fully verified production dependency refresh
+        if: steps.validate.outputs.verified == 'true'
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'

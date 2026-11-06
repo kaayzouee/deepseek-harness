@@ -447,6 +447,8 @@ it('opens, pages, navigates and streams into a 240-turn browser history', async 
   const budgets: Record<string, number> = {
     ...Object.fromEntries(Object.entries(REFERENCE).map(([key, value]) => [key, ciTimeBudget(value) + (key === 'streamWall' ? REPLAY_DURATION_MS : 0)])),
     open: OPEN_BUDGET_MS, page: PAGE_BUDGET_MS, trajectory: TRAJECTORY_BUDGET_MS,
+    // The paced replay extends cumulative Chromium task work while preserving input-overlap coverage.
+    streamTask: ciTimeBudget(2200),
   }
   console.log(JSON.stringify({ benchmark: 'long-session-browser/median', turns: HISTORY_TURNS, deltas: DELTAS, paceMs: PACE_MS, samples, aggregate, referenceMs: REFERENCE, expectedOpenCiMs: EXPECTED_OPEN_CI_MS, expectedPageCiMs: EXPECTED_PAGE_CI_MS, expectedTrajectoryCiMs: EXPECTED_TRAJECTORY_CI_MS, budgets }))
   recordTimings(CASE, Object.fromEntries(SCALED_ENDPOINTS.map(key => [key, { ms: aggregate[key]!, ioShare: IO_SHARE }])), budgets)
