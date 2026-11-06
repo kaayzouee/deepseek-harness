@@ -52,14 +52,44 @@ jobs:
           set -euo pipefail
           # A targeted update, not a blanket package major-version upgrade
           # or an audit ignore. pnpm changes only declared matching dependencies.
+          # Only root declares affected Vite 8.x. Other workspaces intentionally
+          # use Vite 5/6; their existing majors are not vulnerable to this GHSA.
+          pnpm --filter @deepseek-ai/dsh-root update 'vite@^8.2.4' \
+            --lockfile-only --ignore-scripts
           pnpm --recursive update \
             '@modelcontextprotocol/sdk@^1.32.0' \
-            'vite@^8.2.4' \
             'body-parser@^2.4.0' \
             'happy-dom@^21.0.4' \
             'undici@^8.12.2' \
             --lockfile-only --ignore-scripts
-          # Update transitive resolutions where their declared ranges permit.
+          # Keep only targeted version edits, not pnpm's incidental workspace
+          # manifest sorting or additional auto-generated dev dependency entries.
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          const changed = execFileSync('git', ['diff', '--name-only', '--', '**/package.json', 'package.json'], { encoding: 'utf8' }).trim().split('\n').filter(Boolean)
+          const targets = new Set(['vite', '@modelcontextprotocol/sdk', 'body-parser', 'happy-dom', 'undici'])
+          for (const path of changed) {
+            const beforeText = execFileSync('git', ['show', `HEAD:${path}`], { encoding: 'utf8' })
+            const before = JSON.parse(beforeText)
+            const after = JSON.parse(readFileSync(path, 'utf8'))
+            for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+              for (const [name, oldSpec] of Object.entries(before[section] ?? {})) {
+                if (!targets.has(name)) continue
+                const newSpec = after[section]?.[name]
+                if (typeof newSpec !== 'string' || newSpec === oldSpec) continue
+                if (name === 'vite' && path !== 'package.json') {
+                  // Vite 5/6 are intentionally on separate major lines.
+                  if (Number(oldSpec.match(/\d+/)?.[0]) !== Number(newSpec.match(/\d+/)?.[0])) continue
+                }
+                before[section][name] = newSpec
+              }
+            }
+            writeFileSync(path, JSON.stringify(before, null, 2) + '\n')
+          }
+          NODE
+          # Re-resolve transitive ranges against the trimmed manifests.
+          pnpm install --lockfile-only --ignore-scripts
           pnpm dedupe --lockfile-only --ignore-scripts
       - name: Save proposed manifest and lockfile diff
         if: always()
