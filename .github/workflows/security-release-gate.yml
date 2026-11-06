@@ -1,0 +1,99 @@
+name: DSH security and release gate
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-security-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Frozen lockfile, security, tests and release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '24'
+      - name: Activate pinned pnpm
+        run: corepack enable && corepack prepare pnpm@11.28.5 --activate
+      - name: Frozen dependency install without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify all workspace package dependencies
+        run: pnpm run verify-package-dependencies
+      - name: Verify DSH release family and publication order
+        run: pnpm run release:verify --family dsh
+      - name: Dry-run coordinated DSH release-family version bump
+        run: pnpm run release:dsh 0.2.2-rc.1-zod.1 --dry-run
+      - name: Reject vulnerable or duplicate Zod lockfile resolutions
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs'
+          const lock = readFileSync('pnpm-lock.yaml', 'utf8')
+          const matches = [...lock.matchAll(/^  ['"]?zod@(\d+\.\d+\.\d+)(?:\([^\n]*)?['"]?:/gm)]
+          const versions = [...new Set(matches.map(m => m[1]))]
+          if (versions.length !== 1 || versions[0] !== '4.6.7') {
+            throw new Error('expected only patched zod@4.6.7 in lockfile; found ' + JSON.stringify(versions))
+          }
+          if (/(?:^|[^\d])zod@4\.4\.3(?:[^\d]|$)/m.test(lock)) {
+            throw new Error('vulnerable zod@4.4.3 remains in lockfile')
+          }
+          console.log('Locked Zod resolution:', versions[0])
+          NODE
+      - name: Audit complete host production dependency graph
+        run: pnpm audit --prod --audit-level high
+      # The high-severity audit above remains blocking. Capture the full
+      # production inventory separately so moderate/low findings stay visible
+      # without pretending their remediation is complete.
+      - name: Record moderate and low dependency findings
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dsh-host-production-advisories.json"
+          # pnpm returns 1 for the remaining reported vulnerabilities. This
+          # report-only step must not change the high-severity gate above.
+          audit_status=0
+          pnpm audit --prod --audit-level low --json > "$report" || audit_status=$?
+          test -s "$report"
+          node --input-type=module - "$report" <<'NODE'
+          import { readFileSync } from 'node:fs'
+          const report = JSON.parse(readFileSync(process.argv[2], 'utf8'))
+          if (!report || typeof report !== 'object' || !report.metadata?.vulnerabilities) {
+            throw new Error('pnpm audit returned an unrecognized report')
+          }
+          const v = report.metadata.vulnerabilities
+          if ((v.high ?? 0) > 0 || (v.critical ?? 0) > 0) {
+            throw new Error('high/critical advisories unexpectedly remained after the blocking audit')
+          }
+          console.log('Remaining production dependency advisory inventory:', v)
+          NODE
+          {
+            echo '### Complete production dependency advisory inventory'
+            echo 'The blocking high-severity audit passed. Moderate/low findings are recorded in the attached artifact for remediation; they are not waived or ignored.'
+            echo "Audit report exit status: $audit_status"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload complete production advisory report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dsh-production-dependency-advisories
+          path: ${{ runner.temp }}/dsh-host-production-advisories.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Targeted dependency and release regression tests
+        run: pnpm exec vitest run scripts/release
+      - name: Verify package manifest unchanged by frozen install
+        run: git diff --exit-code -- package.json pnpm-lock.yaml

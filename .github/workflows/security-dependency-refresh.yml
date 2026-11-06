@@ -1,0 +1,152 @@
+# One-shot rehearsal and conditional branch update for the five vulnerable host
+# dependency names found by the blocking production audit on 2026-11-06.
+# Only the repository owner's existing security PR branch may perform a write.
+name: DSH advisory remediation candidate
+
+on:
+  push:
+    branches: [fix/zod-ghsa-mrhx-c7xc-m3w5]
+    paths:
+      - .github/workflows/security-dependency-refresh.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-advisory-remediation
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.repository == 'kaayzouee/deepseek-harness' && github.actor == 'kaayzouee' && github.ref == 'refs/heads/fix/zod-ghsa-mrhx-c7xc-m3w5'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      CI: 'true'
+      DSH_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: fix/zod-ghsa-mrhx-c7xc-m3w5
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: pnpm/action-setup@v5.0.0
+        with:
+          dest: ${{ runner.temp }}/setup-pnpm
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Check out expected security branch
+        run: |
+          set -euo pipefail
+          test "$(git branch --show-current)" = fix/zod-ghsa-mrhx-c7xc-m3w5
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Install pinned dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Refresh direct manifests and the locked transitive graph
+        run: |
+          set -euo pipefail
+          # A targeted update, not a blanket package major-version upgrade
+          # or an audit ignore. pnpm changes only declared matching dependencies.
+          # Only root declares affected Vite 8.x. Other workspaces intentionally
+          # use Vite 5/6; their existing majors are not vulnerable to this GHSA.
+          pnpm --filter @deepseek-ai/dsh-root update 'vite@^8.2.4' \
+            --lockfile-only --ignore-scripts
+          pnpm --recursive update \
+            '@modelcontextprotocol/sdk@^1.32.0' \
+            'body-parser@^2.4.0' \
+            'happy-dom@^21.0.4' \
+            'undici@^8.12.2' \
+            --lockfile-only --ignore-scripts
+          # Keep only targeted version edits, not pnpm's incidental workspace
+          # manifest sorting or additional auto-generated dev dependency entries.
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          const changed = execFileSync('git', ['diff', '--name-only', '--', '**/package.json', 'package.json'], { encoding: 'utf8' }).trim().split('\n').filter(Boolean)
+          const targets = new Set(['vite', '@modelcontextprotocol/sdk', 'body-parser', 'happy-dom', 'undici'])
+          for (const path of changed) {
+            const beforeText = execFileSync('git', ['show', `HEAD:${path}`], { encoding: 'utf8' })
+            const before = JSON.parse(beforeText)
+            const after = JSON.parse(readFileSync(path, 'utf8'))
+            for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+              for (const [name, oldSpec] of Object.entries(before[section] ?? {})) {
+                if (!targets.has(name)) continue
+                const newSpec = after[section]?.[name]
+                if (typeof newSpec !== 'string' || newSpec === oldSpec) continue
+                if (name === 'vite' && path !== 'package.json') {
+                  // Vite 5/6 are intentionally on separate major lines.
+                  if (Number(oldSpec.match(/\d+/)?.[0]) !== Number(newSpec.match(/\d+/)?.[0])) continue
+                }
+                before[section][name] = newSpec
+              }
+            }
+            writeFileSync(path, JSON.stringify(before, null, 2) + '\n')
+          }
+          NODE
+          # Re-resolving direct packages can reintroduce older, vulnerable
+          # transitive pins. Keep these four overrides narrowly documented:
+          # - zod restores the patched, single-version workspace invariant;
+          # - Vitest's Happy DOM peer requires a major upgrade and tests;
+          # - Express and undici have fixed transitive pins downstream.
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          const path = 'pnpm-workspace.yaml'
+          let text = readFileSync(path, 'utf8')
+          const anchor = 'overrides:\n'
+          if (!text.includes(anchor)) throw new Error('pnpm workspace overrides section missing')
+          const additional = [
+            "  zod: '4.6.7'",
+            "  'vitest>happy-dom': '21.0.4'",
+            "  'express>body-parser': '2.4.0'",
+            "  'undici@8.10.2': '8.12.3'",
+          ].filter(line => !text.includes(line)).join('\n')
+          if (additional) text = text.replace(anchor, anchor + additional + '\n')
+          writeFileSync(path, text)
+          NODE
+          # Re-resolve transitive ranges against the trimmed manifests and
+          # enforce reviewed security pins before performing an audit.
+          pnpm install --lockfile-only --ignore-scripts
+          pnpm dedupe --lockfile-only --ignore-scripts
+      - name: Save proposed manifest and lockfile diff
+        if: always()
+        run: |
+          git diff --binary -- pnpm-lock.yaml pnpm-workspace.yaml '**/package.json' package.json > "${{ runner.temp }}/dsh-advisory-refresh.patch"
+          git diff --stat >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Publish candidate diff for manual review
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dsh-advisory-refresh
+          path: ${{ runner.temp }}/dsh-advisory-refresh.patch
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Validate refreshed locked graph
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -n "$(git diff --name-only -- pnpm-lock.yaml)"
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run verify-package-dependencies
+          pnpm run release:verify --family dsh
+          pnpm audit --prod --audit-level high
+          pnpm exec vitest run scripts/release
+          git diff --check
+      - name: Commit only a passing security refresh to the same branch
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- pnpm-lock.yaml pnpm-workspace.yaml
+          # Include manifest edits without accidentally staging build artifacts.
+          git add -- '*package.json'
+          git diff --cached --check
+          git commit -m 'fix(security): refresh high-severity DSH host dependencies'
+          # This is a normal fast-forward push. If the branch advanced while
+          # checking dependencies, reject instead of overwriting its changes.
+          git push origin HEAD:refs/heads/fix/zod-ghsa-mrhx-c7xc-m3w5
+          echo 'Refresh committed after dependency, audit, and release checks passed. Run the full PR platform CI on the new commit before merge.' >> "$GITHUB_STEP_SUMMARY"

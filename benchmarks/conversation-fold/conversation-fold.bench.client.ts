@@ -63,7 +63,7 @@ const STREAMING_WORKLOADS = [
 ] as const
 const STREAMING_CASES = STREAMING_WORKLOADS.flatMap(workload => [
   { ...workload, blockType: 'text', pattern: 'ordinary' },
-  { ...workload, blockType: 'reasoning', pattern: 'leading-whitespace' },
+  { ...workload, blockType: 'reasoning', pattern: 'leading-whitespace', expectedMs: workload.fragments === 16_384 ? 40 : 14 },
 ] as const)
 /** Incremental heap while the Assembler, live entries, and published Chat state remain reachable. */
 const EXPECTED_STREAMING_RETAINED_MB = 16

@@ -13,6 +13,9 @@ permissions:
 
 jobs:
   policy:
+    # This governance workflow reads the upstream organization's project and
+    # app credentials; fork PRs have neither and must use their own policy.
+    if: github.repository == 'deepseek-harness/deepseek-harness'
     name: Issue policy
     runs-on: ubuntu-latest
     steps:

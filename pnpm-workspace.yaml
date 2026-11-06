@@ -15,6 +15,10 @@ packages:
   - python/sdk-runtime
 
 overrides:
+  zod: '4.6.7'
+  'vitest>happy-dom': '21.0.4'
+  'express>body-parser': '2.4.0'
+  'undici@8.10.2': '8.12.3'
   'extract-zip>yauzl': '3.4.0'
   '@deepseek-ai/cosmokit': 'link:vendor/cosmokit'
   '@deepseek-ai/schemastery': 'link:vendor/schemastery'
