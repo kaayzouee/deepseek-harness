@@ -88,13 +88,34 @@ jobs:
             writeFileSync(path, JSON.stringify(before, null, 2) + '\n')
           }
           NODE
-          # Re-resolve transitive ranges against the trimmed manifests.
+          # Re-resolving direct packages can reintroduce older, vulnerable
+          # transitive pins. Keep these four overrides narrowly documented:
+          # - zod restores the patched, single-version workspace invariant;
+          # - Vitest's Happy DOM peer requires a major upgrade and tests;
+          # - Express and undici have fixed transitive pins downstream.
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          const path = 'pnpm-workspace.yaml'
+          let text = readFileSync(path, 'utf8')
+          const anchor = 'overrides:\n'
+          if (!text.includes(anchor)) throw new Error('pnpm workspace overrides section missing')
+          const additional = [
+            "  zod: '4.6.7'",
+            "  'vitest>happy-dom': '21.0.4'",
+            "  'express>body-parser': '2.4.0'",
+            "  'undici@8.10.2': '8.12.3'",
+          ].filter(line => !text.includes(line)).join('\n')
+          if (additional) text = text.replace(anchor, anchor + additional + '\n')
+          writeFileSync(path, text)
+          NODE
+          # Re-resolve transitive ranges against the trimmed manifests and
+          # enforce reviewed security pins before performing an audit.
           pnpm install --lockfile-only --ignore-scripts
           pnpm dedupe --lockfile-only --ignore-scripts
       - name: Save proposed manifest and lockfile diff
         if: always()
         run: |
-          git diff --binary -- pnpm-lock.yaml '**/package.json' package.json > "${{ runner.temp }}/dsh-advisory-refresh.patch"
+          git diff --binary -- pnpm-lock.yaml pnpm-workspace.yaml '**/package.json' package.json > "${{ runner.temp }}/dsh-advisory-refresh.patch"
           git diff --stat >> "$GITHUB_STEP_SUMMARY" || true
       - name: Publish candidate diff for manual review
         if: always()
@@ -120,7 +141,7 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- pnpm-lock.yaml
+          git add -- pnpm-lock.yaml pnpm-workspace.yaml
           # Include manifest edits without accidentally staging build artifacts.
           git add -- '*package.json'
           git diff --cached --check
