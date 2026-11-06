@@ -3,11 +3,9 @@
 # Never change the high-severity threshold or publish unvalidated changes.
 name: DSH residual advisory refresh
 
+# Deliberately manual: pnpm's broad fixer touched 101 files in its first
+# candidate. Future experiments must not become a recurring PR branch churn.
 on:
-  push:
-    branches: [fix/zod-ghsa-mrhx-c7xc-m3w5]
-    paths:
-      - .github/workflows/security-residual-refresh.yml
   workflow_dispatch:
 
 permissions:
@@ -73,6 +71,15 @@ jobs:
           set -euo pipefail
           git diff --check
           test -n "$(git diff --name-only -- pnpm-lock.yaml pnpm-workspace.yaml)"
+          # Production fixes must remain narrowly scoped. pnpm audit --fix=update
+          # currently rewrites unrelated workspace manifests and may relax
+          # exact dependency pins. Refuse automated commits of those rewrites.
+          unexpected_manifests="$(git diff --name-only -- '*package.json')"
+          if [ -n "$unexpected_manifests" ]; then
+            echo "::error::Refusing bulk package manifest updates; inspect the candidate artifact and use targeted changes."
+            echo "$unexpected_manifests"
+            exit 1
+          fi
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm run verify-package-dependencies
           pnpm run release:verify --family dsh
