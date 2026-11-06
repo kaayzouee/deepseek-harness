@@ -110,9 +110,9 @@ jobs:
           runs=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/runs" \
             -f head_sha="$sha" -f per_page=100)
           for workflow in 'Release (dsh)' 'DSH security and release gate'; do
-            if ! jq -e --arg name "$workflow" \
+            if ! jq -e --arg name "$workflow" --arg sha "$sha" \
               '[.workflow_runs[] | select(.name == $name and .head_sha == $sha and .conclusion == "success")] | length > 0' \
-              --arg sha "$sha" <<<"$runs"; then
+              <<<"$runs"; then
               echo "No successful $workflow run for master commit $sha" >&2
               exit 1
             fi
