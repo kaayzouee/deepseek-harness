@@ -49,8 +49,11 @@ jobs:
           set -euo pipefail
           # --fix=update updates lockfile resolutions rather than adding blanket
           # audit ignores or changing the required security gate.
+          # pnpm's automatic fixer requires the same dependency inclusion mode
+          # as node_modules. The frozen install contains devDependencies, so the
+          # fixer uses the full graph; validation still audits production alone.
           audit_status=0
-          pnpm audit --prod --audit-level low --fix=update || audit_status=$?
+          pnpm audit --audit-level low --fix=update || audit_status=$?
           echo "Initial audit remediation exit status: $audit_status" >> "$GITHUB_STEP_SUMMARY"
           git diff --stat >> "$GITHUB_STEP_SUMMARY" || true
       - name: Capture reviewable proposed dependency diff
