@@ -79,19 +79,57 @@ function expectInputOverlap(value: boolean): void {
 }
 
 async function waitForReplyMarker(page: Page, marker: string, timeout = 30000) {
-  return page.waitForFunction(({ marker, first, done }) => {
-    const reply = Array.from(document.querySelectorAll('[data-chat-flow-kind="assistant-step"]')).at(-1)
-    if (!reply) return false
-    const text = document.createTreeWalker(reply, NodeFilter.SHOW_TEXT)
-    let node: Node | null
-    while ((node = text.nextNode())) {
-      if (!node.textContent?.includes(marker) || !node.parentElement?.checkVisibility({ checkVisibilityCSS: true })) continue
-      const composer = Array.from(document.querySelectorAll('[data-composer-input][contenteditable="true"]')).at(-1)
-      const transcript = reply.textContent ?? ''
-      return { atMs: window.performance.now(), focused: document.activeElement === composer, first: transcript.includes(first), done: transcript.includes(done) }
+  return page.evaluateHandle(({ marker, first, done, timeout }) => new Promise<{
+    atMs: number; focused: boolean; first: boolean; done: boolean
+  }>((resolve, reject) => {
+    const selector = '[data-chat-flow-kind="assistant-step"]'
+    const latest = (): Element | null => {
+      const rows = document.querySelectorAll(selector)
+      return rows.item(rows.length - 1)
     }
-    return false
-  }, { marker, first: FIRST, done: DONE }, { polling: 'raf', timeout })
+    // Search the full history once; inspect only the latest Assistant on text updates.
+    let reply = latest()
+    let frame = 0
+    let pending = false
+    const observer = new MutationObserver(changes => {
+      if (reply === null || !reply.isConnected || changes.some(change => change.type === 'childList'
+        && Array.from(change.addedNodes).some(node => node.nodeType === Node.ELEMENT_NODE
+          && ((node as Element).matches(selector) || (node as Element).querySelector(selector) !== null)))) {
+        reply = latest()
+      }
+      schedule()
+    })
+    const cleanup = (): void => {
+      observer.disconnect()
+      clearTimeout(timer)
+      cancelAnimationFrame(frame)
+    }
+    const check = (): void => {
+      if (reply === null) return
+      const text = document.createTreeWalker(reply, NodeFilter.SHOW_TEXT)
+      let node: Node | null
+      while ((node = text.nextNode())) {
+        if (!node.textContent?.includes(marker) || !node.parentElement?.checkVisibility({ checkVisibilityCSS: true })) continue
+        const composer = Array.from(document.querySelectorAll('[data-composer-input][contenteditable="true"]')).at(-1)
+        const transcript = reply.textContent ?? ''
+        cleanup()
+        resolve({ atMs: window.performance.now(), focused: document.activeElement === composer,
+          first: transcript.includes(first), done: transcript.includes(done) })
+        return
+      }
+    }
+    const schedule = (): void => {
+      if (pending) return
+      pending = true
+      frame = requestAnimationFrame(() => { pending = false; check() })
+    }
+    const timer = setTimeout(() => {
+      cleanup()
+      reject(new Error(`Timeout ${timeout}ms exceeded while waiting for ${marker}`))
+    }, timeout)
+    observer.observe(document.documentElement, { childList: true, characterData: true, attributes: true, subtree: true })
+    schedule()
+  }), { marker, first: FIRST, done: DONE, timeout })
 }
 
 async function waitForTrajectory(page: Page, timeout = 30000): Promise<void> {
@@ -160,6 +198,26 @@ it('waits for visible marker text in the latest Assistant step', async () => {
     expect(await observation.jsonValue()).toMatchObject({ first: true, done: false })
     await observation.dispose()
     await expect(waitForReplyMarker(page, DONE, 100)).rejects.toThrow('Timeout')
+  } finally {
+    await browser.close()
+  }
+})
+
+it('observes a new Assistant marker without polling every rendered history row', async () => {
+  const browser = await chromium.launch({ headless: true })
+  try {
+    const page = await browser.newPage()
+    await page.setContent('<div data-chat-flow-kind="assistant-step">older reply</div>')
+    const observed = waitForReplyMarker(page, FIRST)
+    await page.evaluate(marker => {
+      const next = document.createElement('div')
+      next.setAttribute('data-chat-flow-kind', 'assistant-step')
+      next.textContent = marker
+      document.body.append(next)
+    }, FIRST)
+    const result = await observed
+    expect(await result.jsonValue()).toMatchObject({ first: true, done: false })
+    await result.dispose()
   } finally {
     await browser.close()
   }
