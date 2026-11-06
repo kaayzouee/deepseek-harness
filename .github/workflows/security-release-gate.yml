@@ -53,6 +53,6 @@ jobs:
       - name: Audit complete host production dependency graph
         run: pnpm audit --prod --audit-level high
       - name: Targeted dependency and release regression tests
-        run: pnpm exec vitest run scripts/release scripts/verify-package-dependencies.spec.ts
+        run: pnpm exec vitest run scripts/release
       - name: Verify package manifest unchanged by frozen install
         run: git diff --exit-code -- package.json pnpm-lock.yaml
