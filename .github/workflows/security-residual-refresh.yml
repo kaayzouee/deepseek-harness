@@ -1,0 +1,90 @@
+# Best-effort remediation of residual production advisories after the
+# separately blocking high-severity release gate passed.
+# Never change the high-severity threshold or publish unvalidated changes.
+name: DSH residual advisory refresh
+
+on:
+  push:
+    branches: [fix/zod-ghsa-mrhx-c7xc-m3w5]
+    paths:
+      - .github/workflows/security-residual-refresh.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-residual-advisory-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.repository == 'kaayzouee/deepseek-harness' && github.actor == 'kaayzouee' && github.ref == 'refs/heads/fix/zod-ghsa-mrhx-c7xc-m3w5'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      CI: 'true'
+      DSH_TELEMETRY_DISABLED: '1'
+      npm_config_ignore_scripts: 'true'
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: fix/zod-ghsa-mrhx-c7xc-m3w5
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v5.0.0
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Verify starting branch and immutable dependencies
+        run: |
+          set -euo pipefail
+          test "$(git branch --show-current)" = 'fix/zod-ghsa-mrhx-c7xc-m3w5'
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Attempt scoped lockfile-only production advisory updates
+        run: |
+          set -euo pipefail
+          # --fix=update updates lockfile resolutions rather than adding blanket
+          # audit ignores or changing the required security gate.
+          audit_status=0
+          pnpm audit --prod --audit-level low --fix=update || audit_status=$?
+          echo "Initial audit remediation exit status: $audit_status" >> "$GITHUB_STEP_SUMMARY"
+          git diff --stat >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Capture reviewable proposed dependency diff
+        if: always()
+        run: |
+          git diff --binary -- pnpm-lock.yaml pnpm-workspace.yaml '**/package.json' package.json > "${{ runner.temp }}/residual-advisory-refresh.patch"
+      - name: Upload candidate dependency diff
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dsh-residual-advisory-refresh
+          path: ${{ runner.temp }}/residual-advisory-refresh.patch
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Validate candidate without waiving security
+        run: |
+          set -euo pipefail
+          git diff --check
+          test -n "$(git diff --name-only -- pnpm-lock.yaml pnpm-workspace.yaml)"
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run verify-package-dependencies
+          pnpm run release:verify --family dsh
+          pnpm audit --prod --audit-level moderate
+          pnpm exec vitest run scripts/release
+          git diff --check
+      - name: Commit only fully verified production dependency refresh
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- pnpm-lock.yaml pnpm-workspace.yaml
+          git add -- '*package.json'
+          git diff --cached --check
+          git commit -m 'fix(security): remediate residual moderate production advisories'
+          # Fast-forward only. Branch drift causes rejection, never a force push.
+          git push origin HEAD:refs/heads/fix/zod-ghsa-mrhx-c7xc-m3w5
+          echo 'Moderate production advisories remediated; rerun full PR checks for this commit.' >> "$GITHUB_STEP_SUMMARY"
