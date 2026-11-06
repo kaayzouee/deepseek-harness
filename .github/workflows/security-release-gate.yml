@@ -22,11 +22,11 @@ jobs:
       DSH_TELEMETRY_DISABLED: '1'
       CI: 'true'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version: '24'
       - name: Activate pinned pnpm
@@ -56,6 +56,43 @@ jobs:
           NODE
       - name: Audit complete host production dependency graph
         run: pnpm audit --prod --audit-level high
+      # The high-severity audit above remains blocking. Capture the full
+      # production inventory separately so moderate/low findings stay visible
+      # without pretending their remediation is complete.
+      - name: Record moderate and low dependency findings
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dsh-host-production-advisories.json"
+          # pnpm returns 1 for the remaining reported vulnerabilities. This
+          # report-only step must not change the high-severity gate above.
+          audit_status=0
+          pnpm audit --prod --audit-level low --json > "$report" || audit_status=$?
+          test -s "$report"
+          node --input-type=module - "$report" <<'NODE'
+          import { readFileSync } from 'node:fs'
+          const report = JSON.parse(readFileSync(process.argv[2], 'utf8'))
+          if (!report || typeof report !== 'object' || !report.metadata?.vulnerabilities) {
+            throw new Error('pnpm audit returned an unrecognized report')
+          }
+          const v = report.metadata.vulnerabilities
+          if ((v.high ?? 0) > 0 || (v.critical ?? 0) > 0) {
+            throw new Error('high/critical advisories unexpectedly remained after the blocking audit')
+          }
+          console.log('Remaining production dependency advisory inventory:', v)
+          NODE
+          {
+            echo '### Complete production dependency advisory inventory'
+            echo 'The blocking high-severity audit passed. Moderate/low findings are recorded in the attached artifact for remediation; they are not waived or ignored.'
+            echo "Audit report exit status: $audit_status"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload complete production advisory report
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dsh-production-dependency-advisories
+          path: ${{ runner.temp }}/dsh-host-production-advisories.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Targeted dependency and release regression tests
         run: pnpm exec vitest run scripts/release
       - name: Verify package manifest unchanged by frozen install
